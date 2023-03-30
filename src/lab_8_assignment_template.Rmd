@@ -1,0 +1,55 @@
+---
+title: "Lab 8 - Ecological Niche Modeling"
+subtitle: "ECOL 620 - Applications in Landscape Ecology"
+author: "First Last"
+date: "MM/DD/YYYY"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Rules
+1. Using the provided R Markdown template, answer all questions and show your R code where necessary. Note, some questions are just plain text written answers.
+
+2. Complete your assignment using the R markdown file and submit individual assignments to Canvas. Knit your script and submit an .html file on Canvas. Please use  the following naming convention: lab8_firstname_lastname.html (ex. lab8_kyle_horton.html).  Note, we will not grade labs in any other format.
+
+# ################################################################################
+
+### Question 1
+For the five models used in this exercise (envelope, GAM, GLM, Random Forest, and Maxent), list a pro AND con of each approach. (10 pts)
+
+### Question 2
+Generate a two-panel map of the study extent that includes the underlying elevation and the presence and absence observations. Include one panel for 2004 and one for the 2007-2008 data. Color points blue for presence and red for absence (see Canvas example figure). Bird fun fact, ornithologists use four letter codes to denote species common names. In this case, Varied Thrush translates to VATH. (6 pts)
+
+```{r}
+
+```
+
+
+### Question 3
+The example code from Fletcher and Fortin is formulated for the use of presence-only information, albeit at times with synthetic absence information. Why do you think they have ignored the true absence information? (3 pts)
+
+
+### Question 4
+Using the existing code, build the GLM, GAM, and random forest models using the true presence AND absence information in the “vath_2004.csv”. You can direct the model construction as you see fit. Create a three-panel plot of the predicted occurrence for the three presence-absence models generated (see Canvas example figure). (15 pts)
+
+```{r}
+
+```
+
+### Question 5
+For these three models, generate the partial dependence plots. If possible, generalize across the models to describe the association of Varied Thrush occurrence with the predictors (see Canvas example figure). (10 pts)
+```{r}
+
+```
+
+
+### Question 6
+Do your models show improvement as compared to the “presence only” models? Be sure you are comparing apples-to-apples regarding the model construction. For instance, does the model you are comparing have the same predictors? Examine the Model Evaluation section for techniques in formalizing your concussion. (6 pts)
+
+```{r}
+
+```
+

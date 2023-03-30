@@ -1,0 +1,277 @@
+---
+title: "Lab 8 - Ecological Niche Modeling"
+subtitle: "ECOL 620 - Applications in Landscape Ecology"
+author: "George Woolsey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    # code_folding: hide
+editor_options: 
+  chunk_output_type: console
+knit: (function(inputFile, encoding){ 
+    out_dir <- '../';
+    rmarkdown::render(inputFile, encoding = encoding, output_file=file.path(dirname(inputFile), out_dir, 'index.html'));
+    file.copy(from = "..//index.html", to = '..///data//lab8_george_woolsey.html', overwrite = TRUE)
+  })
+---
+
+# Setup
+
+```{r, include=FALSE, warning=F, message=F}
+# knit options
+knitr::opts_chunk$set(
+  echo = TRUE
+  , warning = FALSE
+  , message = FALSE
+  # , results='hide'
+  , fig.width = 10
+  , fig.height = 7
+)
+```
+
+```{r}
+# bread-and-butter
+library(tidyverse)
+library(lubridate)
+library(viridis)
+library(scales)
+library(latex2exp)
+# visualization
+library(kableExtra)
+library(cowplot)
+library(RColorBrewer)
+library(ggtext) # color text on ggplot
+# spatial analysis
+library(terra)
+# ecological niche modeling
+library(mgcv)             #for gams
+library(randomForest)     #for random forest SDMs
+library(MuMIn)            #for model selection
+library(PresenceAbsence)  #for model evaluation
+library(ecospat)         #for model evaluation
+# library(dismo)            #for SDMs... requires `rJava`
+# :'(  :'(  :'(  :'(  :'(  :'(  :'(  
+library(raster)
+library(sp)
+# set seed
+set.seed(11)
+```
+
+## Rules
+
+1. Using the provided R Markdown template, answer all questions and show your R code where necessary. Note, some questions are just plain text written answers.
+
+2. Complete your assignment using the R markdown file and submit individual assignments to Canvas. Knit your script and submit an .html file on Canvas. Please use  the following naming convention: lab8_firstname_lastname.html (ex. lab8_kyle_horton.html).  Note, we will not grade labs in any other format.
+
+```{r, include=FALSE, eval=FALSE}
+corraltive or mechanistic niche modelling?
+  correlative models (most common) ... using in this lab
+
+types of response data: presence only, presence-absence data (preferred)
+generating "absences": presence only data can be used in isolation or they can be compared to background points, sometimes called "pseudo absences" to build distribtion models...would like to see distribution of environmental variable to differ between presence obs and "pseudo absence" obs
+
+```
+
+---
+
+# Question 1
+
+For the five models used in this exercise (envelope, GAM, GLM, Random Forest, and Maxent), list a pro AND con of each approach. (10 pts)
+
+1. **Generalized Linear Models (GLMs)**
+    i. **Pro:** widely used for distribution modeling, allows for alternative distributions for the response variable other than the normal distribution including Poisson, binomial, Bernoulli, and gamma distributions
+    ii. **Con:** Although adding quadratic and cubic terms allows for some potential non-linear responses, GLMs have limited capacity to capture non-linear response functions which are often highlighted in niche theory
+2. **Generalized Additive Models (GAMs)**
+    i. **Pro:** can accommodate non-linearity through the use of “smoothers” that attempt to generalize data into smooth curves by local fitting to subsections of the data (e.g. running average, LOWESS)
+    ii. **Con:** do not allow for parameter estimation (e.g. slope) of the nonlinear relationship
+3. **Random Forest**
+    i. **Pro:** have high predictive performance with reduced bias, and reduced variance in estimates. Can accommodate non-linear relationships and interactions, insensitive to outliers, and can accommodate missing data in predictor variables
+    ii. **Con:** Interpretation of large "forests" which are comprised of many classification trees can be difficult
+4. **Maximum Entropy (Maxent)**
+    i. **Pro:** widely used for distribution modeling, particularly well suited for presence-only data since it does not assume background points are absences as in GAMs, GLMs, and regression trees
+    ii. **Con:** underlying assumptions make it unsuitable for presence–absence analysis of species distributions
+
+---
+
+# Data Preparation
+
+We will use Varied Thrush (*Ixoreus naevius*), American Ornithological Union (AOU) alpha code **VATH**, surveys from northern Idaho and western Montana to build candidate distribution models.
+
+```{r, results='hide', fig.show='hide'}
+# bird survey data
+  # load data
+  vath_survey <- read.csv(file="../data/vath_2004.csv", header=TRUE) |> 
+    dplyr::rename_with(tolower) |> 
+    dplyr::mutate(year = 2004)
+  vath_validation <- read.csv(file="../data/vath_VALIDATION.csv", header=TRUE) |> 
+    dplyr::rename_with(tolower) |> 
+    dplyr::rename(
+      surveyid = x
+      , point = stop
+    )
+  # view data
+  vath_survey |> dplyr::glimpse()
+  vath_survey |> dplyr::count(vath)
+  vath_validation |> dplyr::glimpse()
+  vath_validation |> dplyr::count(vath)
+  # combine data
+  vath_survey_full <- dplyr::bind_rows(
+      vath_survey 
+      , vath_validation |> dplyr::select(names(vath_survey))
+    ) |> 
+    dplyr::mutate(
+      year_lab = ifelse(year >= 2007 & year <= 2008, "2007-2008", as.character(year))
+    )
+  
+  # subsets?
+  if(FALSE){
+    #subset to presence-only / absence-only
+    vath.pres <- vath_survey[vath_survey$VATH==1,]
+    vath.abs <- vath_survey[vath_survey$VATH==0,]
+    vath.pres.xy <- as.matrix(vath.pres[,c("EASTING","NORTHING")])
+    vath.abs.xy <- as.matrix(vath.abs[,c("EASTING","NORTHING")])
+    #validation data
+    vath.val.pres <- as.matrix(vath_validation[vath_validation$VATH==1, c("EASTING","NORTHING")])
+    vath.val.abs <- as.matrix(vath_validation[vath_validation$VATH==0, c("EASTING","NORTHING")])
+    vath.val.xy <- as.matrix(vath_validation[,c("EASTING","NORTHING")])
+  }
+```
+
+Environmental covariate data
+
+```{r, results='hide', fig.show='hide'}
+# raster environmental variables
+  #elevation layer
+  elev <- raster::raster("../data/elev.gri") |> terra::rast()
+  #linear gradient in canopy cover taken from PCA
+  canopy <- raster::raster("../data/cc2.gri") |> terra::rast()
+  #presence of mesic forest
+  mesic <- raster::raster("../data/mesic.gri") |> terra::rast()
+  #mean precip (cm)
+  precip <- raster::raster("../data/precip.gri") |> terra::rast()
+#compare extents and crs
+  terra::ext(elev) == terra::ext(canopy)
+  terra::ext(elev) == terra::ext(mesic)
+  terra::ext(elev) == terra::ext(precip)
+  terra::crs(elev) == terra::crs(canopy)
+  terra::crs(elev) == terra::crs(mesic)
+  terra::crs(elev) == terra::crs(precip)
+# view data
+  terra::values(elev) |> hist()
+  terra::values(canopy) |> hist()
+  terra::values(mesic) |> hist()
+  terra::values(precip) |> hist()
+#resample to align layers
+  #for categorical use nearest neighbor
+  mesic <- terra::resample(x=mesic, y=elev, method = "near") |> 
+    terra::crop(elev)
+  #for continuous data use bilinear
+  precip <- resample(x=precip, y=elev, method = "bilinear") |> 
+    terra::crop(elev)
+#make 1 km wet forest
+  fw <- terra::focalMat(mesic, d = 1000, type = "circle")
+  mesic1km <- terra::focal(mesic, w = fw, fun = "sum", na.rm=T)
+#create raster stack
+layers <- c(canopy, elev, mesic, mesic1km, precip)
+names(layers) <- c("canopy", "elev", "mesic", "mesic1km", "precip")
+layers
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
+
+---
+
+# Question 2
+
+Generate a two-panel map of the study extent that includes the underlying elevation and the presence and absence observations. Include one panel for 2004 and one for the 2007-2008 data. Color points blue for presence and red for absence (see Canvas example figure). Bird fun fact, ornithologists use four letter codes to denote species common names. In this case, Varied Thrush translates to VATH. (6 pts)
+
+**use true presence/absence and not psuedo-absence**
+
+```{r}
+# convert survey and validation data to spatial
+vath_survey_full <- sf::st_as_sf(vath_survey_full, coords = c("easting", "northing"), crs = terra::crs(elev)) |> 
+  dplyr::mutate(
+    pres_abs = ifelse(vath == 1, "Present", "Absent") |> as.factor()
+  )
+# plot
+ggplot() + 
+  geom_raster(
+    data = elev |> as.data.frame(xy=T) |> dplyr::rename(elev=3)
+    , mapping = aes(x=x,y=y,fill=elev)
+  ) +
+  geom_sf(data = vath_survey_full, mapping = aes(color = pres_abs), show.legend = F) +
+  facet_wrap(~year_lab) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_gradient(low = "black", high = "gray95", na.value = "transparent") +
+  scale_color_manual(values = c("firebrick", "navy")) +
+  labs(
+    x = "Longitude"
+    , y = "Latitude"
+    , fill = "Elevation (km)"
+    , color = "VATH presence"
+    , subtitle = "<span><span style='color:FireBrick;'><b><i>VATH Absent</i></b></span> | <span style='color:Navy;'><b><i>VATH Present</i></b></span></span>"
+  ) +
+  theme_light() +
+  theme(
+    legend.position = "bottom"
+    , legend.direction = "horizontal"
+    , legend.text = element_text(size = 8, angle = 25, hjust = 0.7)
+    , legend.title = element_text(size = 8)
+    , axis.title = element_text(size = 8)
+    , axis.text.y = element_text(size=7)
+    , axis.text.x = element_text(size=7)
+    , panel.grid = element_blank()
+    , strip.text.x = element_text(size = 14, color = "black")
+    , strip.background = element_blank()
+    , plot.subtitle = ggtext::element_markdown(size = 10)
+  )
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
+
+
+# Question 3
+
+The example code from Fletcher and Fortin is formulated for the use of presence-only information, albeit at times with synthetic absence information. Why do you think they have ignored the true absence information? (3 pts)
+
+
+
+
+# Question 4
+
+Using the existing code, build the GLM, GAM, and random forest models using the true presence AND absence information in the “vath_2004.csv”. You can direct the model construction as you see fit. Create a three-panel plot of the predicted occurrence for the three presence-absence models generated (see Canvas example figure). (15 pts)
+
+```{r}
+
+```
+
+# Question 5
+
+For these three models, generate the partial dependence plots. If possible, generalize across the models to describe the association of Varied Thrush occurrence with the predictors (see Canvas example figure). (10 pts)
+```{r}
+
+```
+
+
+# Question 6
+
+Do your models show improvement as compared to the “presence only” models? Be sure you are comparing apples-to-apples regarding the model construction. For instance, does the model you are comparing have the same predictors? Examine the Model Evaluation section for techniques in formalizing your concussion. (6 pts)
+
+```{r}
+
+```
+
+<span style="color: teal;">
+text
+</span>
+
+
