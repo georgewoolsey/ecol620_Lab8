@@ -51,7 +51,7 @@ library(randomForest)     #for random forest SDMs
 library(MuMIn)            #for model selection
 library(PresenceAbsence)  #for model evaluation
 library(ecospat)         #for model evaluation
-# library(dismo)            #for SDMs... requires `rJava`
+library(dismo)            #for SDMs... requires `rJava`
 # :'(  :'(  :'(  :'(  :'(  :'(  :'(  
 library(raster)
 library(sp)
@@ -97,6 +97,8 @@ For the five models used in this exercise (envelope, GAM, GLM, Random Forest, an
 
 # Data Preparation
 
+## Bird survey data
+
 We will use Varied Thrush (*Ixoreus naevius*), American Ornithological Union (AOU) alpha code **VATH**, surveys from northern Idaho and western Montana to build candidate distribution models.
 
 ```{r, results='hide', fig.show='hide'}
@@ -139,7 +141,7 @@ We will use Varied Thrush (*Ixoreus naevius*), American Ornithological Union (AO
   }
 ```
 
-Environmental covariate data
+## Environmental covariate data
 
 ```{r, results='hide', fig.show='hide'}
 # raster environmental variables
@@ -179,6 +181,14 @@ names(layers) <- c("canopy", "elev", "mesic", "mesic1km", "precip")
 layers
 ```
 
+investigate correlation among environmental covariates
+
+```{r}
+terra::pairs(layers, maxcells = min(10000, terra::ncell(layers)*.1))
+# remove mesic layer
+layers <- terra::subset(layers, subset = c("mesic"), negate = T)
+```
+
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
 remove(list = ls()[grep("_temp",ls())])
 gc()
@@ -194,9 +204,23 @@ Generate a two-panel map of the study extent that includes the underlying elevat
 
 ```{r}
 # convert survey and validation data to spatial
-vath_survey_full <- sf::st_as_sf(vath_survey_full, coords = c("easting", "northing"), crs = terra::crs(elev)) |> 
+vath_survey_full <- sf::st_as_sf(
+    vath_survey_full
+    , coords = c("easting", "northing")
+    , crs = terra::crs(elev)
+  ) |> 
   dplyr::mutate(
     pres_abs = ifelse(vath == 1, "Present", "Absent") |> as.factor()
+  )
+vath_survey <- sf::st_as_sf(
+    vath_survey
+    , coords = c("easting", "northing")
+    , crs = terra::crs(elev)
+  )
+vath_validation <- sf::st_as_sf(
+    vath_validation
+    , coords = c("easting", "northing")
+    , crs = terra::crs(elev)
   )
 # plot
 ggplot() + 
@@ -243,6 +267,9 @@ gc()
 
 The example code from Fletcher and Fortin is formulated for the use of presence-only information, albeit at times with synthetic absence information. Why do you think they have ignored the true absence information? (3 pts)
 
+```{r}
+
+```
 
 
 
@@ -250,9 +277,100 @@ The example code from Fletcher and Fortin is formulated for the use of presence-
 
 Using the existing code, build the GLM, GAM, and random forest models using the true presence AND absence information in the “vath_2004.csv”. You can direct the model construction as you see fit. Create a three-panel plot of the predicted occurrence for the three presence-absence models generated (see Canvas example figure). (15 pts)
 
+## Data preparation
+
+Sample background points: Generate random points that can be used to extract background values ("random-absence"). The points are sampled (without replacement) from the cells that are not `NA` in raster
+
 ```{r}
+#Generate availability/background points using dismo
+background_points <- dismo::randomPoints(
+    layers |> raster::raster()
+    , p = vath_survey |> dplyr::filter(vath == 1) |> sf::st_coordinates()
+    , n = 2000
+  ) |> 
+  dplyr::as_tibble() |> 
+  dplyr::mutate(sampid = dplyr::row_number()) |> 
+  sf::st_as_sf(
+    coords = c("x", "y")
+    , crs = terra::crs(elev)
+  )
+# quick plot
+ggplot() + 
+  geom_raster(data = layers$elev |> as.data.frame(xy=T), aes(x=x,y=y,fill=elev)) +
+  geom_sf(data = background_points, alpha = 0.6) +
+  scale_fill_viridis_c() +
+  labs(title = "background sample points", fill="elev (km)") +
+  theme_light()
 
 ```
+
+Extract environmental data at point locations
+
+```{r}
+#extract GIS data
+#extracts values from layers at pres locations
+  pres.cov_temp <- terra::extract(
+    layers
+    , vath_survey |> 
+      dplyr::filter(vath == 1) |> 
+      terra::vect()
+    , ID = F
+  ) |> 
+  dplyr::bind_cols(
+    vath_survey |> dplyr::filter(vath == 1) |> dplyr::select(geometry)
+  ) |> 
+  ## make sure no data is missing
+  dplyr::filter(dplyr::if_all(dplyr::everything(), ~ !is.na(.x))) |> 
+  dplyr::mutate(presence = 1)
+#extracts values from layers at random locations
+  back.cov_temp <- terra::extract(
+    layers
+    , background_points |> 
+      terra::vect()
+    , ID = F
+  ) |> 
+  dplyr::bind_cols(
+    background_points |> dplyr::select(geometry)
+  ) |> 
+  ## make sure no data is missing
+  dplyr::filter(dplyr::if_all(dplyr::everything(), ~ !is.na(.x))) |> 
+  dplyr::mutate(presence = 0)
+# combine into training data
+  training_cover <- rbind(pres.cov_temp, back.cov_temp)
+#extracts values from layers at validation locations
+  validation_cover <- terra::extract(
+    layers
+    , vath_validation |> 
+      terra::vect()
+    , ID = F
+  ) |> 
+  dplyr::bind_cols(
+    vath_validation |> dplyr::mutate(presence = vath) |> dplyr::select(geometry, presence)
+  ) |> 
+  ## make sure no data is missing
+  dplyr::filter(dplyr::if_all(dplyr::everything(), ~ !is.na(.x)))
+  
+
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
+
+## Models
+
+### GLM
+
+```{r}
+pred_glm <- glm(
+  formula = presence ~ canopy + elev + I(elev^2) + mesic1km + precip
+  , family = binomial(link=logit)
+  , data = training_cover |> sf::st_drop_geometry()
+)
+
+```
+
 
 # Question 5
 
