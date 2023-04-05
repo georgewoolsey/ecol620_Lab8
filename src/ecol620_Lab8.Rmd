@@ -362,12 +362,167 @@ gc()
 
 ### GLM
 
-```{r}
-pred_glm <- glm(
+```{r, results='hide', fig.show='hide'}
+# glm model
+mod_glm <- stats::glm(
   formula = presence ~ canopy + elev + I(elev^2) + mesic1km + precip
   , family = binomial(link=logit)
   , data = training_cover |> sf::st_drop_geometry()
 )
+# store predictions
+pred_glm <- terra::predict(object = layers, model = mod_glm, type = "response")
+#plot
+plot(pred_glm)
+```
+
+### GAM
+
+```{r}
+# GAM (default settings with optimal knots determined by generalized cross validation)
+mod_gam_def <- mgcv::gam(
+  formula = presence ~ s(canopy) + s(elev) + s(mesic1km) + s(precip)
+  , family = binomial(link=logit)
+  , method = "ML"
+  , data = training_cover |> sf::st_drop_geometry()
+)
+#Adjust the number of knots
+## knots 3
+mod_gam_knt3 <- mgcv::gam(
+  formula = presence ~ s(canopy, k = 3) + s(elev, k = 3) + s(mesic1km, k = 3) + s(precip, k = 3)
+  , family = binomial(link=logit)
+  , method = "ML"
+  , data = training_cover |> sf::st_drop_geometry()
+)
+## knots 6
+mod_gam_knt6 <- mgcv::gam(
+  formula = presence ~ s(canopy, k = 6) + s(elev, k = 6) + s(mesic1km, k = 6) + s(precip, k = 6)
+  , family = binomial(link=logit)
+  , method = "ML"
+  , data = training_cover |> sf::st_drop_geometry()
+)
+#plot relationships and compare
+# plot(mod_gam_knt3, shade=T)
+# plot(mod_gam_knt6, shade=T)
+#Consider interactions among splines with tensors (this is slow; ~ 6min)
+if(FALSE){
+mod_gam_tnsr <- mgcv::gam(
+  formula = presence ~ te(canopy, elev, precip, mesic1km)
+  , family = binomial(link=logit)
+  , method = "ML"
+  , data = training_cover |> sf::st_drop_geometry()
+)
+}
+#Change the smoothing function
+# use cubic spline basis... see: ?mgcv::smooth.terms
+mod_gam_cbcspln <- mgcv::gam(
+  formula = presence ~ s(canopy, bs = "cr") + s(elev, bs = "cr") + s(mesic1km, bs = "cr") + s(precip, bs = "cr")
+  , family = binomial(link=logit)
+  , method = "ML"
+  , data = training_cover |> sf::st_drop_geometry()
+)
+```
+
+#### Evaluate model predictions
+
+```{r, results='asis'}
+##
+#evaluation with AIC
+mod_aic_temp <- round(AIC(mod_gam_def, mod_gam_knt3, mod_gam_knt6, mod_gam_cbcspln), 1) |> 
+  as.data.frame() |> 
+  tibble::rownames_to_column("model") |> 
+  dplyr::arrange(AIC) |> 
+  dplyr::mutate(rank = dplyr::row_number()) |> 
+  dplyr::relocate(rank)
+# table
+  kableExtra::kable(
+    mod_aic_temp
+      , format = "html" 
+      , caption = "AIC of GAM models"
+      , digits = 3
+    ) |> 
+    kable_styling(font_size = 14)
+```
+
+store predictions
+
+```{r, fig.show='hide'}
+# store predictions
+pred_gam <- terra::predict(object = layers, model = mod_gam_knt6, type = "response")
+#plot
+plot(pred_gam)
+```
+
+### Random Forest
+
+```{r, results='hide', fig.show='hide'}
+#random forest model (default)
+mod_rf_def <- randomForest::randomForest(
+  formula = as.factor(presence) ~ canopy + elev + mesic1km + precip
+  , na.action = na.omit
+  , data = training_cover |> sf::st_drop_geometry()
+)
+#tuning model
+rf_tune <- randomForest::tuneRF(
+  y = as.factor(training_cover$presence)
+  , x = training_cover |> sf::st_drop_geometry() |> dplyr::select(canopy,elev,mesic1km,precip)
+  , stepFactor = 0.5
+  , ntreeTry = 500
+)
+#update rf model with mtry=1 based on tuning
+mod_rf_def <- randomForest::randomForest(
+  formula = as.factor(presence) ~ canopy + elev + mesic1km + precip
+  , mtry = 1
+  , ntree = 500
+  , na.action = na.omit
+  , data = training_cover |> sf::st_drop_geometry()
+)
+#variable importance plot
+randomForest::varImpPlot(mod_rf_def)
+# store predictions
+pred_rf <- terra::predict(object = layers, model = mod_rf_def, type = "prob")[[2]]
+#plot
+plot(pred_rf)
+```
+
+## Model Predictions
+
+```{r}
+# plot
+ggplot() + 
+  geom_raster(
+    data = 
+      dplyr::bind_rows(
+        pred_glm |> as.data.frame(xy=T) |> dplyr::rename(occurance=3) |> dplyr::mutate(model = "GLM")
+        , pred_gam |> as.data.frame(xy=T) |> dplyr::rename(occurance=3) |> dplyr::mutate(model = "GAM")
+        , pred_rf |> as.data.frame(xy=T) |> dplyr::rename(occurance=3) |> dplyr::mutate(model = "Random Forest")
+      ) |> 
+      dplyr::mutate(
+        model = factor(model, levels = c("GLM", "GAM", "Random Forest"), ordered = T)
+      )
+    , mapping = aes(x=x,y=y,fill=occurance)
+  ) +
+  geom_sf(data = vath_survey_full |> dplyr::slice_head(n=1), show.legend = F, color = "transparent") +
+  facet_grid(cols = vars(model)) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_viridis_c(option = "plasma", na.value = "transparent") +
+  labs(
+    x = "Longitude"
+    , y = "Latitude"
+    , fill = "Occurance"
+  ) +
+  theme_light() +
+  theme(
+    legend.position = "bottom"
+    , legend.direction = "horizontal"
+    , legend.text = element_text(size = 8, angle = 25, hjust = 0.7)
+    , legend.title = element_text(size = 8)
+    , axis.title = element_text(size = 8)
+    , axis.text.y = element_text(size=7)
+    , axis.text.x = element_text(size=7)
+    , panel.grid = element_blank()
+    
+  )
 
 ```
 
@@ -375,6 +530,7 @@ pred_glm <- glm(
 # Question 5
 
 For these three models, generate the partial dependence plots. If possible, generalize across the models to describe the association of Varied Thrush occurrence with the predictors (see Canvas example figure). (10 pts)
+
 ```{r}
 
 ```
