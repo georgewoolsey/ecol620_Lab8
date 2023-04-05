@@ -127,18 +127,6 @@ We will use Varied Thrush (*Ixoreus naevius*), American Ornithological Union (AO
       year_lab = ifelse(year >= 2007 & year <= 2008, "2007-2008", as.character(year))
     )
   
-  # subsets?
-  if(FALSE){
-    #subset to presence-only / absence-only
-    vath.pres <- vath_survey[vath_survey$VATH==1,]
-    vath.abs <- vath_survey[vath_survey$VATH==0,]
-    vath.pres.xy <- as.matrix(vath.pres[,c("EASTING","NORTHING")])
-    vath.abs.xy <- as.matrix(vath.abs[,c("EASTING","NORTHING")])
-    #validation data
-    vath.val.pres <- as.matrix(vath_validation[vath_validation$VATH==1, c("EASTING","NORTHING")])
-    vath.val.abs <- as.matrix(vath_validation[vath_validation$VATH==0, c("EASTING","NORTHING")])
-    vath.val.xy <- as.matrix(vath_validation[,c("EASTING","NORTHING")])
-  }
 ```
 
 ## Environmental covariate data
@@ -173,8 +161,8 @@ We will use Varied Thrush (*Ixoreus naevius*), American Ornithological Union (AO
   precip <- resample(x=precip, y=elev, method = "bilinear") |> 
     terra::crop(elev)
 #make 1 km wet forest
-  fw <- terra::focalMat(mesic, d = 1000, type = "circle")
-  mesic1km <- terra::focal(mesic, w = fw, fun = "sum", na.rm=T)
+  fw_temp <- terra::focalMat(mesic, d = 1000, type = "circle")
+  mesic1km <- terra::focal(mesic, w = fw_temp, fun = "sum", na.rm=T)
 #create raster stack
 layers <- c(canopy, elev, mesic, mesic1km, precip)
 names(layers) <- c("canopy", "elev", "mesic", "mesic1km", "precip")
@@ -229,7 +217,7 @@ ggplot() +
     , mapping = aes(x=x,y=y,fill=elev)
   ) +
   geom_sf(data = vath_survey_full, mapping = aes(color = pres_abs), show.legend = F) +
-  facet_wrap(~year_lab) +
+  facet_grid(cols = vars(year_lab)) + 
   scale_x_continuous(expand = c(0, 0)) +
   scale_y_continuous(expand = c(0, 0)) +
   scale_fill_gradient(low = "black", high = "gray95", na.value = "transparent") +
@@ -251,7 +239,7 @@ ggplot() +
     , axis.text.y = element_text(size=7)
     , axis.text.x = element_text(size=7)
     , panel.grid = element_blank()
-    , strip.text.x = element_text(size = 14, color = "black")
+    , strip.text = element_text(size = 14, color = "black")
     , strip.background = element_blank()
     , plot.subtitle = ggtext::element_markdown(size = 10)
   )
@@ -267,11 +255,9 @@ gc()
 
 The example code from Fletcher and Fortin is formulated for the use of presence-only information, albeit at times with synthetic absence information. Why do you think they have ignored the true absence information? (3 pts)
 
-```{r}
-
-```
-
-
+<span style="color: teal;">
+Fletcher and Fortin note that presence-only data are widely available across broad geographic areas. As such, it is possible that the authors wanted to provide example analysis for this type of data, including the generation of background points for simulating absence data, even though there was absence data available in these survey data. Furthermore, it is sometimes argued that presence-only data can circumvent the problem of false negatives in presence–absence data (i.e., recording an absence when in fact the species is present).
+</span>
 
 # Question 4
 
@@ -359,6 +345,36 @@ gc()
 ```
 
 ## Models
+
+### Envelope Model
+
+[Fletcher and Fortin (2018)](https://link.springer.com/book/10.1007/978-3-030-01989-1) p. 240:
+
+*Envelope models can be readily fit in the `dismo` package. In these models, we only use the presence locations. To create the envelope, the `bioclim` function in `dismo` calculates the percentiles of observed environmental covariates at presence locations and the values of covariates at each location on the map are compared to these percentiles. The closer the value of the location to the median value of a covariate at presence locations, the more suitable that location is deemed to be. Then, the minimum similarity value across covariates is used.*
+
+```{r, results='hide', fig.show='hide'}
+#fit model
+mod_envelope <- dismo::bioclim(
+  x = layers |> raster::stack()
+  , p = training_cover |> 
+      dplyr::filter(presence == 1) |>
+      dplyr::pull(geometry) |>
+      sf::as_Spatial()
+)
+#inspect
+summary(mod_envelope)
+#plot
+#elev-canopy plot 85% quantile bounding box
+plot(mod_envelope, a=1, b=2, p=0.95)
+#elev-canopy plot 95% quantile bounding box
+plot(mod_envelope, a=1, b=2, p=0.90)
+#elev-precip plot
+plot(mod_envelope, a=1, b=4, p=0.95)
+# store predictions
+pred_envelope <- terra::predict(object = layers, model = mod_envelope)
+#plot
+plot(pred_envelope)
+```
 
 ### GLM
 
@@ -521,31 +537,236 @@ ggplot() +
     , axis.text.y = element_text(size=7)
     , axis.text.x = element_text(size=7)
     , panel.grid = element_blank()
-    
+    , strip.text = element_text(size = 13, color = "black")
+    , strip.background = element_blank()
   )
 
 ```
 
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
 
 # Question 5
 
 For these three models, generate the partial dependence plots. If possible, generalize across the models to describe the association of Varied Thrush occurrence with the predictors (see Canvas example figure). (10 pts)
 
-```{r}
+## Partial Response Data Preparation
 
+In *partial response plots* (or “partial plots”), one environmental covariate is varied across the range of observed values while setting all other environmental covariates to a constant, typically their mean or median. Predictions are made on this new data set to interpret how the models are relating species occurrence to environmental factors. Note that this approach will not adequately illuminate potential interactions between variables if they are considered in models (e.g., through the use of tensor products in GAMs or in Random Forest models). See [Fletcher and Fortin (2018)](https://link.springer.com/book/10.1007/978-3-030-01989-1) p. 251
+
+```{r}
+# filter training data for background (presence=0) locations only
+  # aggregate
+back.cov_summary <- training_cover |>
+  dplyr::filter(presence==0) |> 
+  dplyr::summarise(
+    dplyr::across(
+      c(elev, canopy, precip, mesic1km)
+      , list(
+        min = ~ min(.x, na.rm=T)
+        , max = ~ max(.x, na.rm=T)
+        , median = ~ median(.x, na.rm=T)
+      )
+    )
+  )
+# function to generate data frame over range of data holding other covariates constant
+partial_response_df_fn <- function(my_var, var_list) {
+  #Data frame of data over range of selected var
+    seq_temp <- seq(
+        from = back.cov_summary |> dplyr::pull(paste0(my_var,"_min"))
+        , to = back.cov_summary |> dplyr::pull(paste0(my_var,"_max"))
+        , length = 100
+      )
+    # holding other covariates constant
+    cov_df_temp <- data.frame(x = seq_temp) |> 
+    dplyr::cross_join(
+      back.cov_summary |> 
+        dplyr::select(paste0(var_list[var_list!=my_var], "_median"))
+    ) |> 
+    setNames(c(my_var, var_list[var_list!=my_var])) |>
+    dplyr::select(dplyr::all_of(var_list))
+  # model predictions based on this data
+    pred_df <- data.frame(
+      covariate = my_var
+      , covariate_value = seq_temp
+      , pred_envelope = terra::predict(mod_envelope, cov_df_temp) |> c()
+      , pred_glm = terra::predict(mod_glm, cov_df_temp, type="response") |> c()
+      , pred_gam = terra::predict(mod_gam_knt6, cov_df_temp, type="response") |> c()
+      , pred_rf = terra::predict(mod_rf_def, cov_df_temp, type="prob") |> 
+          as.data.frame() |> dplyr::pull(2)
+    )
+  # return
+    return(pred_df)
+}
+# map over all covariates
+var_list_temp <- c("elev", "canopy", "precip", "mesic1km")
+var_list_nms <- c("Elevation (km)", "Canopy Cover (linear gradient)", "Precipitation (cm)", "% Mesic Habitat within 1km")
+partial_resonse_df <- var_list_temp |> 
+  purrr::map(partial_response_df_fn, var_list = var_list_temp) |> 
+  dplyr::bind_rows() |> 
+  tidyr::pivot_longer(
+    cols = tidyselect::starts_with("pred_")
+    , names_to = "model"
+    , values_to = "predicted_occurance"
+    , names_prefix = "pred_"
+    , values_drop_na = F
+  ) |> 
+  dplyr::mutate(
+    covariate = factor(
+      covariate
+      , levels = var_list_temp
+      , labels = var_list_nms
+      , ordered = T
+    )
+    , model = factor(
+      model
+      , levels = c("envelope", "glm", "gam", "rf")
+      , labels = c("Envelope", "GLM", "GAM", "Random Forest")
+      , ordered = T
+    )
+  )
 ```
 
+## Partial Response Plots
+
+```{r}
+ggplot(
+    data = partial_resonse_df |> dplyr::filter(tolower(model) != "envelope")
+    , mapping = aes(
+      x = covariate_value
+      , y = predicted_occurance
+      , color = model
+    )
+  ) +
+  geom_line(linewidth = 1.1) +
+  facet_wrap(
+    facets = vars(covariate)
+    , ncol = 2
+    , strip.position = "bottom"
+    , scales = "free_x"
+  ) +
+  scale_x_continuous(breaks = scales::extended_breaks(n=8)) +
+  scale_color_viridis_d(option = "turbo", alpha = 0.8) +
+  labs(
+    x = ""
+    , y = "Predicted Occurance"
+  ) +
+  theme_light() +
+  theme(
+    legend.position = "top"
+    , legend.direction = "horizontal"
+    , legend.title = element_blank()
+    , axis.title = element_text(size = 8)
+    , axis.text = element_text(size=7)
+    , strip.background = element_blank()
+    , strip.text = element_text(color = "black")
+    , strip.placement = "outside"
+  ) +
+  guides(colour = guide_legend(override.aes = list(size = 10)))
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
 
 # Question 6
 
-Do your models show improvement as compared to the “presence only” models? Be sure you are comparing apples-to-apples regarding the model construction. For instance, does the model you are comparing have the same predictors? Examine the Model Evaluation section for techniques in formalizing your concussion. (6 pts)
+Do your models show improvement as compared to the “presence only” models? Be sure you are comparing apples-to-apples regarding the model construction. For instance, does the model you are comparing have the same predictors? Examine the Model Evaluation section for techniques in formalizing your conclusion. (6 pts)
+
+## Data Preparation
+
+[Fletcher and Fortin (2018)](https://link.springer.com/book/10.1007/978-3-030-01989-1) p. 253:
+
+*The `dismo` package includes the evaluation function, but here we use the `PresenceAbsence` package (Freeman and Moisen 2008), which includes a more comprehensive set of evaluation metrics. To use the `PresenceAbsence` package, we create a data frame that includes (in the following order): (1) site IDs for the validation (evaluation) data; (2) the observed responses in the validation data; and (3) model predictions for those locations. This data frame can have predictions from $N$ models, where columns for predictions are $3$ to $N+3$.*
 
 ```{r}
+#predictions for validation
+var_list_temp <- c("elev", "canopy", "precip", "mesic1km")
+cov_df_temp <- validation_cover |> dplyr::select(dplyr::all_of(var_list_temp))
+# data frame for presence-abscense
+# model predictions based on this data
+# val.data
+validation_pred_df <- data.frame( 
+  siteID = 1:nrow(validation_cover)
+  , obs = validation_cover$presence
+  , pred_envelope = terra::predict(mod_envelope, cov_df_temp) |> c()
+  , pred_glm = terra::predict(mod_glm, cov_df_temp, type="response") |> c()
+  , pred_gam = terra::predict(mod_gam_knt6, cov_df_temp, type="response") |> c()
+  , pred_rf = terra::predict(mod_rf_def, cov_df_temp, type="prob") |> 
+      as.data.frame() |> dplyr::pull(2)
+)
+#correlation among model predictions
+cor_matrix <- cor(
+    validation_pred_df |> dplyr::select(dplyr::starts_with("pred_"))
+    , method="spearman"
+  )
+  # keep lower triangle
+  cor_matrix[!lower.tri(cor_matrix, diag = FALSE)] <- NA
+  cor_matrix <- cor_matrix[2:nrow(cor_matrix), 1:ncol(cor_matrix)-1]
+# table of correlation matrix
+  options(knitr.kable.NA = "")
+  kableExtra::kable(cor_matrix
+      , format = "html" 
+      , caption = "Correlation between model preditions of VATH occurance"
+      , digits = 3
+    ) |> 
+    kable_styling(font_size = 11)
+```
+
+## Evaluation of modeling algorithms
+
+[Fletcher and Fortin (2018)](https://link.springer.com/book/10.1007/978-3-030-01989-1) p. 254:
+
+*For model evaluation, we will calculate three continuous metrics: AUC, the biserial correlation coefficient, and the cross-validated log-likelihood (Lawson et al. 2014). We will also calculate four binary metrics taken from the confusion matrix: sensitivity, specificity, kappa, and the true skill statistic. The `PresenceAbsence` package can determine thresholds based on a variety of criteria, such as prevalence in the test or training data, maximizing kappa or maximizing the sum of specificity and sensitivity (see ?optimal.thresholds). Here, we focus on using a threshold that maximizes the sum of specificity and sensitivity (opt.methods¼3 in the optimal.thresholds function), which was recommended by Liu et al. (2013). In the following for loop, we calculate each of these metrics for each model and populate our summary data frame with the output. We first load the `PresenceAbsence` package and detach glmnet, because the latter package also includes a function for calculating AUC.*
+
+```{r}
+#data frame to store summary statistics
+summary.eval <- data.frame(matrix(nrow=0, ncol=9))
+names(summary.eval) <- c("model", "auc", "corr", "ll", "threshold", "sens", "spec", "tss", "kappa")
+nmodels <- ncol(validation_pred_df)-2
+# loop to generate model validation statistics
+for(i in 1:nmodels){
+  #calculate summary statistics
+  auc.i <- PresenceAbsence::auc(validation_pred_df, which.model=i)
+  kappa.opt <- PresenceAbsence::optimal.thresholds(validation_pred_df, which.model=i, opt.methods=3)
+  sens.i <- PresenceAbsence::sensitivity(
+    PresenceAbsence::cmx(
+      validation_pred_df, which.model=i,threshold = kappa.opt[[2]]
+    ))
+  spec.i <- PresenceAbsence::specificity(
+    PresenceAbsence::cmx(
+      validation_pred_df, which.model=i,threshold = kappa.opt[[2]]
+    ))
+  tss.i<- sens.i$sensitivity + spec.i$specificity - 1
+  kappa.i <- PresenceAbsence::Kappa(
+    PresenceAbsence::cmx(
+      validation_pred_df, which.model=i,threshold = kappa.opt[[2]]
+    ))
+  corr.i <- stats::cor.test(validation_pred_df[,2], validation_pred_df[,i+2])$estimate
+  ll.i <- sum(log(validation_pred_df[,i+2]*validation_pred_df[,2] + (1-validation_pred_df[,i+2])*(1-validation_pred_df[,2])))
+  ll.i <- ifelse(ll.i=="-Inf", sum(log(validation_pred_df[,i+2]+0.001)*validation_pred_df[,2] + log((1-validation_pred_df[,i+2]))*(1-validation_pred_df[,2])), ll.i)
+
+  #summarize
+  summary.i <- c(i,auc.i$AUC, corr.i, ll.i,kappa.opt[[2]], sens.i$sensitivity, spec.i$specificity, tss.i, kappa.i[[1]])
+  summary.eval <- rbind(summary.eval, summary.i)
+}
+names(summary.eval) <- c("model", "auc", "corr", "ll", "threshold", "sens", "spec", "tss", "kappa")
+#add model names
+summary.eval$model <- validation_pred_df |> dplyr::select(dplyr::starts_with("pred_")) |> names() |> stringr::str_remove("pred_") 
+#inspect
+summary.eval |> 
+  kableExtra::kable(
+      format = "html" 
+      , caption = "Evaluation of modeling algorithms based on external validation (presence–absence data collected 3–4 years later)"
+      , digits = 3
+    ) |> 
+    kable_styling(font_size = 11)
 
 ```
 
 <span style="color: teal;">
-text
+The "envelope" model only uses the presence locations. Comparing the other models to the envelope model shows that all models - GLM, GAM, and Random Forest - tended to predict better than the presence-only model based on the Area under the Receiver Operating Characteristic (ROC) Curve (AUC) criterion (an AUC value of 0.5 can be interpreted as the model performing no better than a random prediction). Evaluating model performance based on the True Skill Statistic (TSS) yields similar results with the GLM and GAM models performing better than the envelope and random forest models (a TSS of +1 indicates perfect agreement and values of zero or less indicate a performance no better than random).
 </span>
-
-
